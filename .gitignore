@@ -1,0 +1,8 @@
+/heatguard
+/*.db
+/*.db-shm
+/*.db-wal
+/.env
+/.gomark-authoring/
+/coverage.out
+
