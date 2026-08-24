@@ -2,7 +2,6 @@ package planning
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -261,15 +260,7 @@ func (s *Service) CloseSegment(ctx context.Context, segmentID, version, actorID 
 		return domain.Validation("closure", "requires a valid time window")
 	}
 	return s.store.WithinTx(ctx, func(tx repository.Tx) error {
-		err := tx.UpdateSegmentClosure(ctx, segmentID, version, from, until)
-		if errors.Is(err, domain.ErrVersionConflict) {
-			current, loadErr := tx.GetRouteSegment(ctx, segmentID)
-			if loadErr != nil {
-				return loadErr
-			}
-			err = tx.UpdateSegmentClosure(ctx, segmentID, current.Version, from, until)
-		}
-		if err != nil {
+		if err := tx.UpdateSegmentClosure(ctx, segmentID, version, from, until); err != nil {
 			return err
 		}
 		return s.audit.Record(ctx, tx, actorID, "segment.close", "route_segment", segmentID, "success", requestID, map[string]any{"from": from, "until": until})

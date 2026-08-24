@@ -325,6 +325,13 @@ func TestRouteSegmentsRoundTripAndClosureVersion(t *testing.T) {
 	if err := store.UpdateSegmentClosure(context.Background(), segments[1].ID, 1, &from, &until); !errors.Is(err, domain.ErrVersionConflict) {
 		t.Fatalf("stale closure got %v", err)
 	}
+	stored, err := store.GetRouteSegment(context.Background(), segments[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ClosedFrom == nil || !stored.ClosedFrom.Equal(from) {
+		t.Fatalf("newer closure overwritten: %+v", stored)
+	}
 }
 
 func TestWaveParticipantAndOptimisticUpdates(t *testing.T) {

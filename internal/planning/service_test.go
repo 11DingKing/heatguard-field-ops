@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/11DingKing/heatguard-field-ops/internal/audit"
 	"github.com/11DingKing/heatguard-field-ops/internal/domain"
+	"github.com/11DingKing/heatguard-field-ops/internal/repository"
 	"github.com/11DingKing/heatguard-field-ops/internal/storage/sqlite"
 )
 
@@ -98,5 +100,57 @@ func TestCreateRouteRejectsInvalidSegmentBeforePersistence(t *testing.T) {
 	_, _, err := service.CreateRoute(context.Background(), CreateRouteInput{Name: "Invalid Route", Zone: "north", Kind: domain.ActivityRun, DistanceMeters: 5000, ActorID: organizer.ID, RequestID: "route-request", Segments: []domain.RouteSegment{{Name: "Start", Checkpoint: domain.GeoPoint{Latitude: 30, Longitude: 120}}, {Name: "Bad", Checkpoint: domain.GeoPoint{Latitude: 100, Longitude: 120}}}})
 	if !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("route got %v", err)
+	}
+}
+
+func TestCloseSegmentRejectsStaleVersion(t *testing.T) {
+	service, store, now := planningFixture(t)
+	organizer := planningUser(t, store, "organizer-segment@example.test", domain.RoleOrganizer, now)
+	_, segments, err := service.CreateRoute(context.Background(), CreateRouteInput{
+		Name: "Closure Route", Zone: "north", Kind: domain.ActivityRun, DistanceMeters: 5000,
+		ActorID: organizer.ID, RequestID: "route-request",
+		Segments: []domain.RouteSegment{
+			{Name: "Start", Checkpoint: domain.GeoPoint{Latitude: 30, Longitude: 120}},
+			{Name: "Bridge", Checkpoint: domain.GeoPoint{Latitude: 30.01, Longitude: 120.01}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment := segments[1]
+	// Tablet A retains version 1 while offline; tablet B extends the closure window first.
+	staleFrom := now.Add(time.Hour)
+	staleUntil := staleFrom.Add(30 * time.Minute)
+	if err := service.CloseSegment(context.Background(), segment.ID, 1, organizer.ID, &staleFrom, &staleUntil, "close-a"); err != nil {
+		t.Fatal(err)
+	}
+	// Another terminal extends the window using the refreshed version.
+	current, err := store.GetRouteSegment(context.Background(), segment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extendedFrom := now.Add(time.Hour)
+	extendedUntil := extendedFrom.Add(2 * time.Hour)
+	if err := service.CloseSegment(context.Background(), segment.ID, current.Version, organizer.ID, &extendedFrom, &extendedUntil, "close-b"); err != nil {
+		t.Fatal(err)
+	}
+	// Stale tablet A syncs its shorter window carrying the old version; it must be rejected.
+	err = service.CloseSegment(context.Background(), segment.ID, 1, organizer.ID, &staleFrom, &staleUntil, "close-stale")
+	if !errors.Is(err, domain.ErrVersionConflict) {
+		t.Fatalf("stale closure got %v, want version conflict", err)
+	}
+	preserved, err := store.GetRouteSegment(context.Background(), segment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.ClosedUntil == nil || !preserved.ClosedUntil.Equal(extendedUntil) {
+		t.Fatalf("newer closure not preserved: %+v", preserved)
+	}
+	events, err := store.ListAuditEvents(context.Background(), "route_segment", strconv.FormatInt(segment.ID, 10), repository.Page{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("audit events = %d, want 2 (no audit for rejected stale write)", len(events))
 	}
 }
