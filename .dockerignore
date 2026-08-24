@@ -1,0 +1,7 @@
+.git
+.gomark-authoring
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+heatguard
