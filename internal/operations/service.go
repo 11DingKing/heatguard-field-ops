@@ -46,8 +46,6 @@ func (s *Service) Depart(ctx context.Context, input DepartInput) (domain.Activit
 		return s.store.GetWave(ctx, id)
 	}
 	var departed domain.ActivityWave
-	var departureJob domain.WorkerJob
-	var departureDecision risk.Decision
 	err := s.store.WithinTx(ctx, func(tx repository.Tx) error {
 		wave, err := tx.GetWave(ctx, input.WaveID)
 		if err != nil {
@@ -112,26 +110,26 @@ func (s *Service) Depart(ctx context.Context, input DepartInput) (domain.Activit
 				return err
 			}
 		}
-		departureJob = domain.WorkerJob{Kind: "checkpoint_watch", DedupeKey: fmt.Sprintf("wave:%d:checkpoint-watch", wave.ID), Payload: fmt.Sprintf(`{"wave_id":%d}`, wave.ID), Status: domain.JobPending, MaxAttempts: 5, AvailableAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now}
-		departureDecision = decision
+		job := domain.WorkerJob{Kind: "checkpoint_watch", DedupeKey: fmt.Sprintf("wave:%d:checkpoint-watch", wave.ID), Payload: fmt.Sprintf(`{"wave_id":%d}`, wave.ID), Status: domain.JobPending, MaxAttempts: 5, AvailableAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now}
+		if _, err := tx.InsertJob(ctx, &job); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, input.ActorID, "wave.depart", "wave", wave.ID, "success", input.RequestID, map[string]any{"risk": decision.Level, "rules": decision.MatchedRules}); err != nil {
+			return err
+		}
+		// The idempotency record must be the final write: only after the whole
+		// batch state (wave + members), the checkpoint-watch job, and the audit
+		// trail are durably committed together. Keeping it in the same
+		// transaction means an audit-storage rejection rolls back the entire
+		// departure so the batch is reported as still ready on retry.
+		if _, err := tx.InsertIdempotencyResult(ctx, scope, "depart", input.IdempotencyKey, strconv.FormatInt(wave.ID, 10), now); err != nil {
+			return err
+		}
 		departed = wave
 		departed.State = domain.WaveActive
 		departed.DepartureRisk = decision.Level
 		departed.Version++
 		return nil
-	})
-	if err != nil {
-		return domain.ActivityWave{}, err
-	}
-	err = s.store.WithinTx(ctx, func(tx repository.Tx) error {
-		if _, err := tx.InsertJob(ctx, &departureJob); err != nil {
-			return err
-		}
-		if err := s.audit.Record(ctx, tx, input.ActorID, "wave.depart", "wave", departed.ID, "success", input.RequestID, map[string]any{"risk": departureDecision.Level, "rules": departureDecision.MatchedRules}); err != nil {
-			return err
-		}
-		_, err := tx.InsertIdempotencyResult(ctx, scope, "depart", input.IdempotencyKey, strconv.FormatInt(departed.ID, 10), s.now().UTC())
-		return err
 	})
 	return departed, err
 }
