@@ -28,9 +28,3 @@ func (s *Service) Record(ctx context.Context, writer repository.Writer, actor in
 	event := domain.AuditEvent{ActorID: &actor, Action: action, ObjectType: objectType, ObjectID: strconv.FormatInt(objectID, 10), Result: result, RequestID: requestID, Metadata: string(payload), CreatedAt: s.now().UTC()}
 	return writer.InsertAudit(ctx, &event)
 }
-
-func (s *Service) RecordStandalone(ctx context.Context, store repository.Store, actor int64, action, objectType string, objectID int64, result, requestID string, metadata any) error {
-	return store.WithinTx(ctx, func(tx repository.Tx) error {
-		return s.Record(ctx, tx, actor, action, objectType, objectID, result, requestID, metadata)
-	})
-}

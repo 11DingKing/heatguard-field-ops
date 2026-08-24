@@ -218,8 +218,7 @@ func (s *Service) AcknowledgeAlert(ctx context.Context, alertID, version, actorI
 }
 
 func (s *Service) CloseWave(ctx context.Context, waveID, version, actorID int64, requestID string) error {
-	participantCount := 0
-	err := s.store.WithinTx(ctx, func(tx repository.Tx) error {
+	return s.store.WithinTx(ctx, func(tx repository.Tx) error {
 		wave, err := tx.GetWave(ctx, waveID)
 		if err != nil {
 			return err
@@ -236,7 +235,6 @@ func (s *Service) CloseWave(ctx context.Context, waveID, version, actorID int64,
 				return domain.ErrPendingSafety
 			}
 		}
-		participantCount = len(members)
 		alerts, err := tx.ListOpenAlerts(ctx, waveID)
 		if err != nil {
 			return err
@@ -249,12 +247,11 @@ func (s *Service) CloseWave(ctx context.Context, waveID, version, actorID int64,
 		if err := tx.UpdateWaveState(ctx, waveID, version, domain.WaveClosed, wave.DepartureRisk, s.now().UTC()); err != nil {
 			return err
 		}
-		return nil
+		// Record the audit event inside the same transaction so a failed audit
+		// write rolls the wave back to its prior state instead of leaving it
+		// closed while the operation reports failure.
+		return s.audit.Record(ctx, tx, actorID, "wave.close", "wave", waveID, "success", requestID, map[string]any{"participants": len(members)})
 	})
-	if err != nil {
-		return err
-	}
-	return s.audit.RecordStandalone(ctx, s.store, actorID, "wave.close", "wave", waveID, "success", requestID, map[string]any{"participants": participantCount})
 }
 
 func (s *Service) SplitWave(ctx context.Context, waveID, version, actorID int64, participantIDs []int64, name, requestID string) (domain.ActivityWave, error) {
