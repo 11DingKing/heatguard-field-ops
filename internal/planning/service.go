@@ -118,8 +118,19 @@ func (s *Service) AddRestriction(ctx context.Context, restriction domain.HealthR
 		return domain.HealthRestriction{}, domain.Validation("restriction", "participant and valid effective window are required")
 	}
 	err := s.store.WithinTx(ctx, func(tx repository.Tx) error {
-		if _, err := tx.GetParticipant(ctx, restriction.ParticipantID); err != nil {
+		participant, err := tx.GetParticipant(ctx, restriction.ParticipantID)
+		if err != nil {
 			return err
+		}
+		actor, err := tx.GetUser(ctx, actorID)
+		if err != nil {
+			return err
+		}
+		if actor.Role == domain.RoleGuardian && (participant.GuardianUserID == nil || *participant.GuardianUserID != actorID) {
+			return domain.ErrForbidden
+		}
+		if actor.Role != domain.RoleGuardian && actor.Role != domain.RoleOrganizer {
+			return domain.ErrForbidden
 		}
 		if err := tx.InsertRestriction(ctx, &restriction); err != nil {
 			return err
