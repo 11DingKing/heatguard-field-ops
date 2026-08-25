@@ -43,9 +43,10 @@ func (s *Service) Notify(ctx context.Context, alertID int64, contact, channel st
 }
 
 func (s *Service) Receipt(ctx context.Context, providerKey, status string, at time.Time) error {
-	processedAt := s.now().UTC()
-	if at.After(processedAt) {
-		processedAt = at.UTC()
-	}
-	return s.store.MergeNotificationReceipt(ctx, providerKey, status, processedAt)
+	// Forward the supplier's event time as-is; the store guards against receipts
+	// that would regress a confirmed delivery or backdate its recorded event time,
+	// which is what happens when a delayed out-of-order receipt arrives after the
+	// network recovers. Clamping to "now" here would let a late failed receipt
+	// overwrite the confirmed delivery time with its arrival moment.
+	return s.store.MergeNotificationReceipt(ctx, providerKey, status, at.UTC())
 }

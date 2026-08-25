@@ -120,10 +120,45 @@ func (s *Store) InsertNotificationAttempt(ctx context.Context, alertID int64, co
 }
 
 func (s *Store) MergeNotificationReceipt(ctx context.Context, providerKey, status string, at time.Time) error {
-	result, err := s.exec.ExecContext(ctx, `UPDATE notification_deliveries SET
-		status = ?,
-		last_receipt_at = ?,
-		updated_at = ? WHERE provider_key = ?`, status, formatTime(at), formatTime(at), providerKey)
+	// Receipts may arrive out of order, especially after a network partition: a
+	// supplier can replay a failed receipt whose event time predates an already
+	// confirmed delivery. The merge must never regress a delivery that has reached
+	// a terminal/forward state, and the recorded event time must reflect the
+	// latest confirmed event rather than the moment the delayed receipt arrived.
+	//
+	// deliveryStatusRank orders the lifecycle so that only forward progress is
+	// persisted: a delayed "failed" cannot displace "sent" or the terminal
+	// "delivered", which is the confirmed delivery end state. last_receipt_at and
+	// updated_at advance only when the incoming event time is newer than what is
+	// already recorded, preserving the latest confirmed event time.
+	const stmt = `UPDATE notification_deliveries SET
+		status = CASE
+			WHEN CASE status
+				WHEN 'queued' THEN 0
+				WHEN 'failed' THEN 1
+				WHEN 'sent' THEN 2
+				WHEN 'delivered' THEN 3
+				ELSE 3
+			END <= CASE ?
+				WHEN 'queued' THEN 0
+				WHEN 'failed' THEN 1
+				WHEN 'sent' THEN 2
+				WHEN 'delivered' THEN 3
+				ELSE 3
+			END THEN ?
+			ELSE status
+		END,
+		last_receipt_at = CASE
+			WHEN last_receipt_at IS NULL OR ? > last_receipt_at THEN ?
+			ELSE last_receipt_at
+		END,
+		updated_at = CASE
+			WHEN last_receipt_at IS NULL OR ? > last_receipt_at THEN ?
+			ELSE updated_at
+		END
+		WHERE provider_key = ?`
+	stamped := formatTime(at)
+	result, err := s.exec.ExecContext(ctx, stmt, status, status, stamped, stamped, stamped, stamped, providerKey)
 	if err != nil {
 		return fmt.Errorf("merge notification receipt: %w", err)
 	}
@@ -131,7 +166,17 @@ func (s *Store) MergeNotificationReceipt(ctx context.Context, providerKey, statu
 	if err != nil {
 		return err
 	}
-	if count != 1 {
+	if count == 1 {
+		return nil
+	}
+	// A guarded update leaves an existing row unchanged when the incoming receipt
+	// would regress state or backdate the event time; only a genuinely missing
+	// delivery is an error.
+	var exists int
+	if err := s.exec.QueryRowContext(ctx, `SELECT COUNT(*) FROM notification_deliveries WHERE provider_key = ?`, providerKey).Scan(&exists); err != nil {
+		return fmt.Errorf("merge notification receipt: %w", err)
+	}
+	if exists == 0 {
 		return domain.ErrNotFound
 	}
 	return nil

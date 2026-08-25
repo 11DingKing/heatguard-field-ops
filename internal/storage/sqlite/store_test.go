@@ -540,3 +540,99 @@ func TestWaveFilteringUsesSamePredicateForCountAndRows(t *testing.T) {
 		t.Fatalf("rows=%d total=%d", len(waves), total)
 	}
 }
+
+func TestNotificationReceiptDoesNotRegressConfirmedDelivery(t *testing.T) {
+	store := openTestStore(t)
+	actor := insertTestUser(t, store, domain.RoleOrganizer, "receipt-actor")
+	coach := insertTestUser(t, store, domain.RoleCoach, "receipt-coach")
+	route, _ := insertTestRoute(t, store, "receipt")
+	leader := insertTestLeader(t, store, coach)
+	wave := insertTestWave(t, store, route, leader, actor, "receipt")
+	alert := domain.Alert{WaveID: wave.ID, Kind: "heat", Severity: domain.RiskHigh, Status: domain.AlertOpen, DedupeKey: "receipt-heat", OpenedAt: fixedTime(), Version: 1}
+	if _, err := store.InsertAlert(context.Background(), &alert); err != nil {
+		t.Fatal(err)
+	}
+
+	base := fixedTime()
+	deliveredAt := base.Add(2 * time.Minute)
+	failedAt := base.Add(1 * time.Minute) // earlier event time, arrives late after partition
+	providerKey := "alert-receipt-sms"
+	if _, _, err := store.InsertNotificationAttempt(context.Background(), alert.ID, "138", "sms", providerKey, base); err != nil {
+		t.Fatal(err)
+	}
+
+	// The supplier first confirms delivery; this is the confirmed terminal state.
+	if err := store.MergeNotificationReceipt(context.Background(), providerKey, "delivered", deliveredAt); err != nil {
+		t.Fatal(err)
+	}
+
+	// After the network recovers, the supplier replays a failed receipt whose
+	// event time predates the confirmed delivery. It must not regress state or
+	// backdate the recorded event time.
+	if err := store.MergeNotificationReceipt(context.Background(), providerKey, "failed", failedAt); err != nil {
+		t.Fatalf("late failed receipt: %v", err)
+	}
+
+	var status, lastReceipt, updatedAt string
+	if err := store.db.QueryRow(`SELECT status, last_receipt_at, updated_at FROM notification_deliveries WHERE provider_key = ?`, providerKey).Scan(&status, &lastReceipt, &updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "delivered" {
+		t.Fatalf("status regressed to %q, want delivered", status)
+	}
+	gotReceipt, err := parseTime(lastReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotReceipt.Equal(deliveredAt) {
+		t.Fatalf("last_receipt_at = %v, want %v", gotReceipt, deliveredAt)
+	}
+	gotUpdated, err := parseTime(updatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotUpdated.Equal(deliveredAt) {
+		t.Fatalf("updated_at = %v, want %v", gotUpdated, deliveredAt)
+	}
+}
+
+func TestNotificationReceiptAdvancesForwardAcrossEvents(t *testing.T) {
+	store := openTestStore(t)
+	actor := insertTestUser(t, store, domain.RoleOrganizer, "advance-actor")
+	coach := insertTestUser(t, store, domain.RoleCoach, "advance-coach")
+	route, _ := insertTestRoute(t, store, "advance")
+	leader := insertTestLeader(t, store, coach)
+	wave := insertTestWave(t, store, route, leader, actor, "advance")
+	alert := domain.Alert{WaveID: wave.ID, Kind: "heat", Severity: domain.RiskHigh, Status: domain.AlertOpen, DedupeKey: "advance-heat", OpenedAt: fixedTime(), Version: 1}
+	if _, err := store.InsertAlert(context.Background(), &alert); err != nil {
+		t.Fatal(err)
+	}
+
+	base := fixedTime()
+	providerKey := "alert-advance-sms"
+	if _, _, err := store.InsertNotificationAttempt(context.Background(), alert.ID, "138", "sms", providerKey, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MergeNotificationReceipt(context.Background(), providerKey, "failed", base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// A later delivery supersedes the earlier failure and records the newest event.
+	if err := store.MergeNotificationReceipt(context.Background(), providerKey, "delivered", base.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := store.db.QueryRow(`SELECT status FROM notification_deliveries WHERE provider_key = ?`, providerKey).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "delivered" {
+		t.Fatalf("status = %q, want delivered", status)
+	}
+}
+
+func TestNotificationReceiptUnknownProviderIsNotFound(t *testing.T) {
+	store := openTestStore(t)
+	err := store.MergeNotificationReceipt(context.Background(), "unknown-provider", "failed", fixedTime())
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
