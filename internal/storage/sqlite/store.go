@@ -67,6 +67,11 @@ func dataSource(path string) (string, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the underlying connection for read-only callers (e.g. health
+// checks and integration tests). Production write paths must go through the
+// repository methods so transactions and migrations stay consistent.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func (s *Store) Ping(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()

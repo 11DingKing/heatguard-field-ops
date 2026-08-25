@@ -27,14 +27,18 @@ func New(store repository.Store, sender Sender, now func() time.Time) *Service {
 
 func (s *Service) Notify(ctx context.Context, alertID int64, contact, channel string) error {
 	providerKey := fmt.Sprintf("alert-%d-%s-%s", alertID, channel, contact)
-	_, fresh, err := s.store.InsertNotificationAttempt(ctx, alertID, contact, channel, providerKey, s.now().UTC())
+	_, pending, err := s.store.InsertNotificationAttempt(ctx, alertID, contact, channel, providerKey, s.now().UTC())
 	if err != nil {
 		return err
 	}
-	message := fmt.Sprintf("HeatGuard safety alert %d", alertID)
-	if !fresh {
-		message += " (replay)"
+	// A delivery that already reached a terminal state (sent/delivered) is
+	// not retried on worker recovery, so the contact does not receive a
+	// duplicate message. Persisted attempt_count stays put and the status
+	// remains terminal rather than being reset to queued.
+	if !pending {
+		return nil
 	}
+	message := fmt.Sprintf("HeatGuard safety alert %d", alertID)
 	_, err = s.sender.Send(ctx, contact, message)
 	if err != nil {
 		_ = s.store.MergeNotificationReceipt(ctx, providerKey, "failed", s.now().UTC())

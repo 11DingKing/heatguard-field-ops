@@ -99,8 +99,14 @@ func (s *Store) FailJob(ctx context.Context, id int64, owner string, at, retryAt
 }
 
 func (s *Store) InsertNotificationAttempt(ctx context.Context, alertID int64, contact, channel, providerKey string, at time.Time) (int64, bool, error) {
-	result, err := s.exec.ExecContext(ctx, `INSERT INTO notification_deliveries(alert_id, contact, channel, provider_key, status, attempt_count, created_at, updated_at)
-		VALUES(?,?,?,?, 'queued', 1, ?, ?) ON CONFLICT(alert_id, contact, channel) DO UPDATE SET status = 'queued', attempt_count = attempt_count + 1, updated_at = excluded.updated_at`,
+	// A delivery that already reached a terminal state (sent/delivered) must
+	// stay terminal on replay: do not reset it to queued or bump attempt_count.
+	_, err := s.exec.ExecContext(ctx, `INSERT INTO notification_deliveries(alert_id, contact, channel, provider_key, status, attempt_count, created_at, updated_at)
+		VALUES(?,?,?,?, 'queued', 1, ?, ?)
+		ON CONFLICT(alert_id, contact, channel) DO UPDATE SET
+			status = CASE WHEN notification_deliveries.status IN ('sent','delivered') THEN notification_deliveries.status ELSE 'queued' END,
+			attempt_count = CASE WHEN notification_deliveries.status IN ('sent','delivered') THEN notification_deliveries.attempt_count ELSE notification_deliveries.attempt_count + 1 END,
+			updated_at = excluded.updated_at`,
 		alertID, contact, channel, providerKey, formatTime(at), formatTime(at))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -108,15 +114,16 @@ func (s *Store) InsertNotificationAttempt(ctx context.Context, alertID int64, co
 		}
 		return 0, false, fmt.Errorf("insert notification attempt: %w", err)
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
+	var (
+		id     int64
+		status string
+	)
+	if err := s.exec.QueryRowContext(ctx, `SELECT id, status FROM notification_deliveries WHERE alert_id = ? AND contact = ? AND channel = ?`, alertID, contact, channel).Scan(&id, &status); err != nil {
 		return 0, false, err
 	}
-	var attempts int
-	if err := s.exec.QueryRowContext(ctx, `SELECT id, attempt_count FROM notification_deliveries WHERE alert_id = ? AND contact = ? AND channel = ?`, alertID, contact, channel).Scan(&id, &attempts); err != nil {
-		return 0, false, err
-	}
-	return id, attempts == 1, nil
+	// The boolean reports whether the side effect (sending) should still run:
+	// only when the delivery is not yet in a terminal state.
+	return id, status == "queued", nil
 }
 
 func (s *Store) MergeNotificationReceipt(ctx context.Context, providerKey, status string, at time.Time) error {

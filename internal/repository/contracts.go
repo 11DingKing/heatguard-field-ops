@@ -84,6 +84,10 @@ type Writer interface {
 	LeaseJobs(context.Context, JobLease) ([]domain.WorkerJob, error)
 	CompleteJob(context.Context, int64, string, time.Time) error
 	FailJob(context.Context, int64, string, time.Time, time.Time, error) error
+	// InsertNotificationAttempt records a delivery attempt keyed by (alert, contact,
+	// channel). The bool reports whether the delivery still needs the side effect
+	// (sending): false means it already reached a terminal state (sent/delivered)
+	// and must not be re-sent on replay.
 	InsertNotificationAttempt(context.Context, int64, string, string, string, time.Time) (int64, bool, error)
 	MergeNotificationReceipt(context.Context, string, string, time.Time) error
 	InsertIdempotencyResult(context.Context, string, string, string, string, time.Time) (bool, error)
